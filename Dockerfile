@@ -53,6 +53,11 @@ RUN pip install torch==2.8.* torchvision torchaudio --index-url https://download
 # torchao 0.13.0 was built for PyTorch 2.8.0
 RUN pip install torchao==0.13.0
 
+# Install bitsandbytes for HF LLM.int8() pre-quantized models
+# (e.g., FabioSarracino/VibeVoice-Large-Q8). Auto-loads when transformers
+# detects "quant_method: bitsandbytes" in the model's config.json.
+RUN pip install bitsandbytes
+
 # Install flash-attn from pre-built wheel (PyTorch 2.8 compatible).
 # This MUST succeed — fall-through to source build would take ~30 min and
 # requires nvcc which isn't in the runtime image. Fail the build instead.

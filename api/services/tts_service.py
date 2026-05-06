@@ -172,28 +172,46 @@ class TTSService:
         print("Model loaded successfully")
 
     def _apply_quantization(self):
-        """Apply quantization to the model based on settings."""
+        """Apply quantization to the model based on settings.
+
+        Supported VIBEVOICE_QUANTIZATION values:
+          - "int8_torchao"          : INT8 weight-only (slowest matmul on Ampere — dequant overhead)
+          - "int8_dynamic_torchao"  : W8A8 dynamic activation+weight quant — uses 3090 INT8 tensor cores
+          - "int4_torchao"          : INT4 weight-only (smallest, biggest dequant overhead)
+        """
         quant_method = self.settings.vibevoice_quantization
 
         if quant_method == "int8_torchao":
-            self._apply_torchao_quant(bits=8)
+            self._apply_torchao_quant(bits=8, mode="weight_only")
+        elif quant_method == "int8_dynamic_torchao":
+            self._apply_torchao_quant(bits=8, mode="dynamic")
         elif quant_method == "int4_torchao":
-            self._apply_torchao_quant(bits=4)
+            self._apply_torchao_quant(bits=4, mode="weight_only")
         else:
             logger.warning(f"Unknown quantization method: {quant_method}, skipping quantization")
 
-    def _apply_torchao_quant(self, bits: int = 8):
+    def _apply_torchao_quant(self, bits: int = 8, mode: str = "weight_only"):
         """
-        Apply torchao weight-only quantization to the language model.
+        Apply torchao quantization to the language model.
 
         This selectively quantizes only the LLM (Qwen2) decoder and lm_head,
         keeping audio components (tokenizers, diffusion head, connectors) at full precision.
 
         Args:
-            bits: 8 for INT8 (~40% VRAM reduction) or 4 for INT4 (~60% VRAM reduction, faster)
+            bits: 8 for INT8 (~40% VRAM reduction) or 4 for INT4 (~60% VRAM reduction, smaller).
+            mode: "weight_only" — weights INT8/INT4, activations FP16. Bandwidth win, slow on
+                  Ampere because of dequant→FP16 before matmul.
+                  "dynamic" — weights INT8 + activations dynamically quantized to INT8 per batch.
+                  Uses 3090's INT8 tensor cores (568 TOPS) for the matmul itself, no dequant.
+                  Only supported with bits=8.
         """
         try:
-            from torchao.quantization import quantize_, int8_weight_only, int4_weight_only
+            from torchao.quantization import (
+                quantize_,
+                int8_weight_only,
+                int4_weight_only,
+                int8_dynamic_activation_int8_weight,
+            )
         except ImportError:
             logger.error(
                 "torchao not installed. Install with: pip install torchao\n"
@@ -201,13 +219,16 @@ class TTSService:
             )
             return
 
-        # Select quantization function based on bits
-        if bits == 4:
+        # Select quantization function based on bits + mode
+        if mode == "dynamic" and bits == 8:
+            quant_fn = int8_dynamic_activation_int8_weight()
+            quant_name = "INT8 dynamic activation + weight (W8A8)"
+        elif bits == 4:
             quant_fn = int4_weight_only()
-            quant_name = "INT4"
+            quant_name = "INT4 weight-only"
         else:
             quant_fn = int8_weight_only()
-            quant_name = "INT8"
+            quant_name = "INT8 weight-only"
 
         # Check if model is on CUDA (for memory logging)
         model_on_cuda = next(self.model.parameters()).is_cuda

@@ -90,10 +90,14 @@ class VibeVoiceGenerateRequest(BaseModel):
         description="Classifier-free guidance scale (1.0-2.0)"
     )
     inference_steps: Optional[int] = Field(
-        default=10,
+        default=None,
         ge=5,
         le=50,
-        description="Number of diffusion inference steps"
+        description=(
+            "Number of diffusion inference steps. When None (default), the "
+            "server-side VIBEVOICE_INFERENCE_STEPS env setting is used. "
+            "Pass an explicit value (5-50) to override per-request."
+        )
     )
     response_format: Optional[Literal["mp3", "opus", "aac", "flac", "wav", "pcm", "m4a"]] = Field(
         default="mp3",
