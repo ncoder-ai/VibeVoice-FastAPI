@@ -1,9 +1,11 @@
 """VibeVoice-specific TTS endpoints with multi-speaker support."""
 
+import asyncio
 import base64
 import logging
+import threading
 import time
-from fastapi import APIRouter, HTTPException, Depends
+from fastapi import APIRouter, HTTPException, Depends, Request
 from fastapi.responses import Response
 
 from api.models import (
@@ -44,158 +46,184 @@ def get_voice_manager() -> VoiceManager:
 
 @router.post("/generate")
 async def generate_speech(
-    request: VibeVoiceGenerateRequest,
+    body: VibeVoiceGenerateRequest,
+    request: Request,
     tts: TTSService = Depends(get_tts_service),
     voices: VoiceManager = Depends(get_voice_manager)
 ):
     """
     Generate multi-speaker speech with VibeVoice-specific features.
-    
+
     Supports:
     - Multi-speaker dialogue (up to 4 speakers)
     - Custom voice samples via base64 or presets
     - CFG scale control
     - Inference step control
     - Real-time streaming via SSE
+    - Cooperative cancellation on client disconnect via stop_check_fn
     """
     try:
         # Load voice samples for each speaker
         voice_samples = []
-        
-        for speaker_config in sorted(request.speakers, key=lambda s: s.speaker_id):
+
+        for speaker_config in sorted(body.speakers, key=lambda s: s.speaker_id):
             if speaker_config.voice_sample_base64:
-                # Decode base64 audio
                 try:
                     audio_bytes = base64.b64decode(speaker_config.voice_sample_base64)
                     import io
                     import soundfile as sf
                     audio_data, sr = sf.read(io.BytesIO(audio_bytes))
-                    
-                    # Resample if needed
+
                     if sr != 24000:
                         import librosa
                         audio_data = librosa.resample(audio_data, orig_sr=sr, target_sr=24000)
-                    
-                    # Convert to mono if needed
+
                     if len(audio_data.shape) > 1:
                         import numpy as np
                         audio_data = np.mean(audio_data, axis=1)
-                    
+
                     voice_samples.append(audio_data.astype('float32'))
-                    
+
                 except Exception as e:
                     raise HTTPException(
                         status_code=400,
                         detail=f"Failed to decode voice sample for speaker {speaker_config.speaker_id}: {str(e)}"
                     )
-            
+
             elif speaker_config.voice_preset:
-                # Load from preset
                 audio_data = voices.load_voice_audio(speaker_config.voice_preset, is_openai_voice=False)
-                
+
                 if audio_data is None:
                     available_voices = [v["name"] for v in voices.list_available_voices()]
                     raise HTTPException(
                         status_code=400,
                         detail=f"Voice preset '{speaker_config.voice_preset}' not found. Available: {', '.join(available_voices)}"
                     )
-                
+
                 voice_samples.append(audio_data)
-            
+
             else:
                 raise HTTPException(
                     status_code=400,
                     detail=f"Speaker {speaker_config.speaker_id} must have either voice_preset or voice_sample_base64"
                 )
-        
-        # Extract voice presets for logging
+
         voice_list = []
-        for speaker_config in sorted(request.speakers, key=lambda s: s.speaker_id):
+        for speaker_config in sorted(body.speakers, key=lambda s: s.speaker_id):
             if speaker_config.voice_preset:
                 voice_list.append(f"speaker{speaker_config.speaker_id}={speaker_config.voice_preset}")
             else:
                 voice_list.append(f"speaker{speaker_config.speaker_id}=base64_audio")
         voices_str = ", ".join(voice_list)
-        
-        # Get actual inference_steps value (request value or default from settings)
-        actual_inference_steps = request.inference_steps if request.inference_steps is not None else settings.vibevoice_inference_steps
-        
-        # Generate speech
-        if request.stream:
-            # Return streaming response
-            # Note: For streaming, we log before generation starts since timing is async
-            text_preview = request.script[:100] + "..." if len(request.script) > 100 else request.script
+
+        actual_inference_steps = body.inference_steps if body.inference_steps is not None else settings.vibevoice_inference_steps
+
+        if body.stream:
+            # Streaming path: cancel_event is wired through tts_service into
+            # model.generate() (stop_check_fn) AND into create_streaming_response
+            # which polls request.is_disconnected() and trips the event when
+            # the client closes the connection. Result: GPU memory is freed
+            # within one outer-step on disconnect, lock released, next request
+            # ready immediately.
+            cancel_event = threading.Event()
+
+            text_preview = body.script[:100] + "..." if len(body.script) > 100 else body.script
             logger.info(
                 f"Generating speech (streaming) - Text: {text_preview} | Voices: {voices_str} | "
-                f"Model: {settings.vibevoice_model_path} | CFG: {request.cfg_scale} | "
-                f"Steps: {actual_inference_steps} | Seed: {request.seed if request.seed is not None else 'None'}"
+                f"Model: {settings.vibevoice_model_path} | CFG: {body.cfg_scale} | "
+                f"Steps: {actual_inference_steps} | Seed: {body.seed if body.seed is not None else 'None'}"
             )
-            
+
             audio_stream = tts.generate_speech(
-                text=request.script,
+                text=body.script,
                 voice_samples=voice_samples,
-                cfg_scale=request.cfg_scale,
-                inference_steps=request.inference_steps,
-                seed=request.seed,
-                stream=True
+                cfg_scale=body.cfg_scale,
+                inference_steps=body.inference_steps,
+                seed=body.seed,
+                stream=True,
+                cancel_event=cancel_event,
             )
-            
-            # For streaming, we can't measure exact time, but log start
+
             return create_streaming_response(
                 audio_stream,
-                format=request.response_format,
+                format=body.response_format,
                 sample_rate=24000,
-                use_sse=True
+                use_sse=True,
+                cancel_event=cancel_event,
+                request=request,
             )
-        
+
         else:
-            # Generate all at once
+            # Non-streaming: run generation in a thread so we can poll for
+            # client disconnect. Same cancellation pattern as OpenAI endpoint.
+            cancel_event = threading.Event()
+            result_holder: dict = {}
+
+            def _run_generation():
+                try:
+                    result_holder['audio'] = tts.generate_speech(
+                        text=body.script,
+                        voice_samples=voice_samples,
+                        cfg_scale=body.cfg_scale,
+                        inference_steps=body.inference_steps,
+                        seed=body.seed,
+                        stream=False,
+                        cancel_event=cancel_event,
+                    )
+                except Exception as e:
+                    result_holder['error'] = e
+
             start_time = time.time()
-            audio = tts.generate_speech(
-                text=request.script,
-                voice_samples=voice_samples,
-                cfg_scale=request.cfg_scale,
-                inference_steps=request.inference_steps,
-                seed=request.seed,
-                stream=False
-            )
+            gen_thread = threading.Thread(target=_run_generation, daemon=True)
+            gen_thread.start()
+
+            while gen_thread.is_alive():
+                await asyncio.sleep(0.1)
+                if await request.is_disconnected():
+                    logger.info("VibeVoice native client disconnected — cancelling generation")
+                    cancel_event.set()
+                    gen_thread.join(timeout=5.0)
+                    return Response(status_code=499)
+
             generation_time = time.time() - start_time
-            
-            # Calculate audio duration
+
+            if 'error' in result_holder:
+                raise result_holder['error']
+
+            audio = result_holder.get('audio')
+            if audio is None:
+                return Response(status_code=499)
+
             audio_duration = get_audio_duration(audio, sample_rate=24000)
-            
-            # Log generation details at INFO level
-            text_preview = request.script[:100] + "..." if len(request.script) > 100 else request.script
+
+            text_preview = body.script[:100] + "..." if len(body.script) > 100 else body.script
             logger.info(
                 f"Generated speech - Text: {text_preview} | Voices: {voices_str} | "
-                f"Model: {settings.vibevoice_model_path} | CFG: {request.cfg_scale} | "
-                f"Steps: {actual_inference_steps} | Seed: {request.seed if request.seed is not None else 'None'} | "
+                f"Model: {settings.vibevoice_model_path} | CFG: {body.cfg_scale} | "
+                f"Steps: {actual_inference_steps} | Seed: {body.seed if body.seed is not None else 'None'} | "
                 f"Audio Duration: {audio_duration:.2f}s | Generation Time: {generation_time:.2f}s"
             )
-            
-            # Convert to requested format
+
             audio_bytes = audio_to_bytes(
                 audio,
                 sample_rate=24000,
-                format=request.response_format
+                format=body.response_format
             )
-            
-            # Use the already calculated duration
+
             duration = audio_duration
-            
-            # Return audio response
+
             from api.utils.audio_utils import get_content_type
             return Response(
                 content=audio_bytes,
-                media_type=get_content_type(request.response_format),
+                media_type=get_content_type(body.response_format),
                 headers={
-                    "Content-Disposition": f"attachment; filename=vibevoice_output.{request.response_format}",
+                    "Content-Disposition": f"attachment; filename=vibevoice_output.{body.response_format}",
                     "X-Audio-Duration": str(duration),
-                    "X-Audio-Format": request.response_format,
+                    "X-Audio-Format": body.response_format,
                     "X-Audio-Sample-Rate": "24000"
                 }
             )
-        
+
     except HTTPException:
         raise
     except Exception as e:
@@ -206,38 +234,25 @@ async def generate_speech(
 
 
 @router.get("/voices", response_model=VoiceListResponse)
-async def list_voices(voices: VoiceManager = Depends(get_voice_manager)):
-    """
-    List all available VibeVoice presets.
-    """
+async def list_vibevoice_voices(
+    voices: VoiceManager = Depends(get_voice_manager)
+):
+    """List all available voices for VibeVoice."""
     try:
-        available_voices = voices.list_available_voices()
-        return VoiceListResponse(voices=available_voices)
+        all_voices = voices.list_available_voices()
+        return VoiceListResponse(voices=all_voices, count=len(all_voices))
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
 
 
 @router.get("/health", response_model=HealthResponse)
-async def health_check(
-    tts: TTSService = Depends(get_tts_service),
-    voices: VoiceManager = Depends(get_voice_manager)
+async def vibevoice_health(
+    tts: TTSService = Depends(get_tts_service)
 ):
-    """
-    Check service health and model status.
-    """
-    try:
-        return HealthResponse(
-            status="healthy",
-            model_loaded=tts.is_loaded,
-            device=tts.device if tts.device else "unknown",
-            model_path=settings.vibevoice_model_path
-        )
-    except Exception as e:
-        return HealthResponse(
-            status="unhealthy",
-            model_loaded=False,
-            device="unknown",
-            model_path=settings.vibevoice_model_path
-        )
-
-
+    """Health check for the VibeVoice service."""
+    return HealthResponse(
+        status="healthy" if tts.is_loaded else "loading",
+        model_loaded=tts.is_loaded,
+        model_path=settings.vibevoice_model_path,
+        device=tts.device or "unknown"
+    )

@@ -1,5 +1,6 @@
 """Core TTS generation service wrapping VibeVoice model."""
 
+import threading
 import torch
 import numpy as np
 from typing import Iterator, List, Optional, Union
@@ -18,11 +19,11 @@ from api.config import Settings
 
 class TTSService:
     """Service for TTS generation using VibeVoice model."""
-    
+
     def __init__(self, settings: Settings):
         """
         Initialize TTS service.
-        
+
         Args:
             settings: Application settings
         """
@@ -32,6 +33,13 @@ class TTSService:
         self.device = None
         self.dtype = None
         self._model_loaded = False
+        # Serialise concurrent generate() calls — VibeVoice's DPM scheduler
+        # keeps step_index as instance state on the shared model object, so
+        # two parallel inference passes would corrupt each other. With the
+        # `stop_check_fn` cancellation hook below, the first thread releases
+        # this lock within ~one outer-loop step (~100-500ms) when cancelled,
+        # so the next request doesn't hang.
+        self._generate_lock = threading.Lock()
     
     def load_model(self):
         """Load VibeVoice model and processor."""
@@ -243,11 +251,12 @@ class TTSService:
         cfg_scale: float = 1.3,
         inference_steps: Optional[int] = None,
         seed: Optional[int] = None,
-        stream: bool = False
+        stream: bool = False,
+        cancel_event: Optional[threading.Event] = None,
     ) -> Union[np.ndarray, Iterator[np.ndarray]]:
         """
         Generate speech from text.
-        
+
         Args:
             text: Input text (formatted with Speaker labels)
             voice_samples: List of voice sample arrays
@@ -255,21 +264,26 @@ class TTSService:
             inference_steps: Number of diffusion steps (None = use default)
             seed: Random seed for reproducibility
             stream: Whether to return streaming iterator
-            
+            cancel_event: Optional threading.Event for cooperative cancellation.
+                When set (e.g. by a disconnect-detection task), the model's
+                undocumented `stop_check_fn` parameter trips at the next outer
+                generation step (~100-500ms) and the lock is released so the
+                next request can proceed immediately.
+
         Returns:
             Generated audio array or iterator of audio chunks
         """
         if not self._model_loaded:
             raise RuntimeError("Model not loaded. Call load_model() first.")
-        
+
         # Set seed if provided
         if seed is not None:
             set_seed(seed)
-        
+
         # Set inference steps if provided
         if inference_steps is not None:
             self.model.set_ddpm_inference_steps(num_steps=inference_steps)
-        
+
         # Process inputs
         inputs = self.processor(
             text=[text],
@@ -278,31 +292,53 @@ class TTSService:
             return_tensors="pt",
             return_attention_mask=True,
         )
-        
+
         # Move to device
         target_device = self.device if self.device in ("cuda", "mps") else "cpu"
         for k, v in inputs.items():
             if torch.is_tensor(v):
                 inputs[k] = v.to(target_device)
-        
+
+        # Build the stop_check_fn closure if a cancel event was provided.
+        # VibeVoice's model.generate() (modular/modeling_vibevoice_inference.py
+        # line ~432) calls this at the top of every outer step in the diffusion
+        # loop and exits cleanly when it returns True.
+        stop_check_fn = (lambda: cancel_event.is_set()) if cancel_event is not None else None
+
         if stream:
-            # Return streaming iterator
-            return self._generate_streaming(inputs, cfg_scale)
+            # Return streaming iterator (lock acquired inside _generate_streaming)
+            return self._generate_streaming(inputs, cfg_scale, cancel_event=cancel_event)
         else:
-            # Generate all at once
-            with torch.no_grad():
-                outputs = self.model.generate(
-                    **inputs,
-                    max_new_tokens=None,
-                    cfg_scale=cfg_scale,
-                    tokenizer=self.processor.tokenizer,
-                    generation_config={'do_sample': False},
-                    return_speech=True,
-                    verbose=False,
-                    refresh_negative=True,
-                    show_progress_bar=False
-                )
-            
+            # Generate all at once. Hold the lock so DPM scheduler state isn't
+            # corrupted by a parallel call. The lock releases naturally when
+            # generation finishes OR cancel fires.
+            try:
+                with self._generate_lock, torch.no_grad():
+                    outputs = self.model.generate(
+                        **inputs,
+                        max_new_tokens=None,
+                        cfg_scale=cfg_scale,
+                        tokenizer=self.processor.tokenizer,
+                        generation_config={'do_sample': False},
+                        stop_check_fn=stop_check_fn,
+                        return_speech=True,
+                        verbose=False,
+                        refresh_negative=True,
+                        show_progress_bar=False
+                    )
+            finally:
+                # Release CUDA cache regardless of outcome (success or cancel).
+                try:
+                    if torch.cuda.is_available():
+                        torch.cuda.empty_cache()
+                except Exception as e:
+                    logger.warning(f"torch.cuda.empty_cache() failed: {e}")
+
+            # If cancellation tripped, return None so the caller knows
+            if cancel_event is not None and cancel_event.is_set():
+                logger.info("Non-streaming generation cancelled by event")
+                return None
+
             # Get audio output
             if outputs.speech_outputs and outputs.speech_outputs[0] is not None:
                 audio = outputs.speech_outputs[0]
@@ -318,15 +354,21 @@ class TTSService:
     def _generate_streaming(
         self,
         inputs: dict,
-        cfg_scale: float
+        cfg_scale: float,
+        cancel_event: Optional[threading.Event] = None,
     ) -> Iterator[np.ndarray]:
         """
-        Generate speech with streaming.
-        
+        Generate speech with streaming. Supports cooperative cancellation
+        via the optional cancel_event using VibeVoice's `stop_check_fn`
+        (checked at every outer-loop step ~ 100-500ms granularity).
+
         Args:
             inputs: Processed model inputs
             cfg_scale: CFG scale
-            
+            cancel_event: When set, the model exits at its next outer-loop
+                step, AudioStreamer.end() is called, and the generation
+                thread is joined with a timeout.
+
         Yields:
             Audio chunks as numpy arrays
         """
@@ -336,40 +378,75 @@ class TTSService:
             stop_signal=None,
             timeout=None
         )
-        
-        # Start generation in background
-        import threading
-        
+
+        # No-op cancel_event if none was provided so the rest of the path is uniform
+        if cancel_event is None:
+            cancel_event = threading.Event()
+
+        # stop_check_fn is what makes cancellation FAST. VibeVoice's
+        # model.generate() checks this at the top of every outer step
+        # in modular/modeling_vibevoice_inference.py around line 432.
+        stop_check_fn = lambda: cancel_event.is_set()
+
         def generate():
-            with torch.no_grad():
-                self.model.generate(
-                    **inputs,
-                    max_new_tokens=None,
-                    cfg_scale=cfg_scale,
-                    tokenizer=self.processor.tokenizer,
-                    generation_config={'do_sample': False},
-                    audio_streamer=audio_streamer,
-                    return_speech=True,
-                    verbose=False,
-                    refresh_negative=True,
-                    show_progress_bar=False
-                )
-        
-        generation_thread = threading.Thread(target=generate)
+            try:
+                # Lock guards shared scheduler state across concurrent stream requests.
+                # Released within ~one outer-step on cancel because of stop_check_fn.
+                with self._generate_lock, torch.no_grad():
+                    self.model.generate(
+                        **inputs,
+                        max_new_tokens=None,
+                        cfg_scale=cfg_scale,
+                        tokenizer=self.processor.tokenizer,
+                        generation_config={'do_sample': False},
+                        audio_streamer=audio_streamer,
+                        stop_check_fn=stop_check_fn,
+                        return_speech=True,
+                        verbose=False,
+                        refresh_negative=True,
+                        show_progress_bar=False
+                    )
+            except Exception as e:
+                logger.error(f"Generation thread error: {e}")
+            finally:
+                # Always release the consumer (yields stop_signal in queues)
+                # so the for-loop below exits even on cancel/error.
+                audio_streamer.end()
+
+        generation_thread = threading.Thread(target=generate, daemon=True)
         generation_thread.start()
-        
-        # Yield chunks as they arrive
-        audio_stream = audio_streamer.get_stream(0)
-        for chunk in audio_stream:
-            if torch.is_tensor(chunk):
-                # Convert bfloat16 to float32 before converting to numpy
-                if chunk.dtype == torch.bfloat16:
-                    chunk = chunk.float()
-                chunk = chunk.cpu().numpy()
-            yield chunk
-        
-        # Wait for generation to complete
-        generation_thread.join(timeout=10.0)
+
+        # Yield chunks as they arrive. We poll cancel_event between chunks
+        # so we exit promptly even before the streamer end signal arrives.
+        try:
+            audio_stream = audio_streamer.get_stream(0)
+            for chunk in audio_stream:
+                if cancel_event.is_set():
+                    logger.info("Streaming consumer detected cancel event, breaking")
+                    break
+                if torch.is_tensor(chunk):
+                    # Convert bfloat16 to float32 before converting to numpy
+                    if chunk.dtype == torch.bfloat16:
+                        chunk = chunk.float()
+                    chunk = chunk.cpu().numpy()
+                yield chunk
+        finally:
+            # Whether we exit via normal completion, cancel, or upstream
+            # exception, signal the worker and wait for it to release the lock.
+            cancel_event.set()
+            # 5s is plenty: stop_check_fn fires at next outer step (~100-500ms
+            # for our 5-step diffusion config), then the lock releases.
+            generation_thread.join(timeout=5.0)
+            if generation_thread.is_alive():
+                logger.warning(
+                    "Generation thread still alive 5s after cancel — "
+                    "model.generate() may not be honouring stop_check_fn"
+                )
+            try:
+                if torch.cuda.is_available():
+                    torch.cuda.empty_cache()
+            except Exception as e:
+                logger.warning(f"torch.cuda.empty_cache() failed: {e}")
     
     def format_script_for_single_speaker(self, text: str, speaker_id: int = 0) -> str:
         """
