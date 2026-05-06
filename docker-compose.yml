@@ -49,6 +49,8 @@ services:
       - ${HF_CACHE_DIR:-~/.cache/huggingface}:/root/.cache/huggingface:rw
       # Mount models directory (optional)
       - ${MODELS_DIR:-./models}:/app/models:rw
+      # Mount torch.compile cache (persists across container restarts → fast first-request after restart)
+      - ${TORCH_CACHE_DIR:-~/.cache/torch_compile_vibevoice}:/app/torch_cache:rw
     
     # Restart policy
     restart: unless-stopped
