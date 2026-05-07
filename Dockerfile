@@ -58,6 +58,11 @@ RUN pip install torchao==0.13.0
 # detects "quant_method: bitsandbytes" in the model's config.json.
 RUN pip install bitsandbytes
 
+# Install autoawq for AWQ-INT4 quantized LLM grafting (Marlin GEMM kernels).
+# Used when VIBEVOICE_QUANTIZATION=awq + VIBEVOICE_AWQ_LLM_PATH points at a
+# pre-quantized Qwen2 checkpoint. Faster than bnb-Q8 and ~22% smaller VRAM.
+RUN pip install autoawq
+
 # Install flash-attn from pre-built wheel (PyTorch 2.8 compatible).
 # This MUST succeed — fall-through to source build would take ~30 min and
 # requires nvcc which isn't in the runtime image. Fail the build instead.
