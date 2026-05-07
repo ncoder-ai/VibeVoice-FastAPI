@@ -6,7 +6,9 @@
 # ============================================================
 
 # Path to VibeVoice model (HuggingFace model ID or local path)
-# Use HuggingFace model ID (downloads automatically) or local path to model directory
+# Use HuggingFace model ID (downloads automatically) or local path to model directory.
+# RECOMMENDED: rsxdalv/VibeVoice-Large + AWQ-INT4 swap (see VIBEVOICE_QUANTIZATION below).
+# That combo uses ~8.4 GB VRAM at RTF ~0.70 — best quality + size + speed on a single 3090.
 VIBEVOICE_MODEL_PATH=microsoft/VibeVoice-1.5B
 #VIBEVOICE_MODEL_PATH=rsxdalv/VibeVoice-Large
 #VIBEVOICE_MODEL_PATH=FabioSarracino/VibeVoice-Large-Q8
@@ -35,9 +37,19 @@ VIBEVOICE_INFERENCE_STEPS=10
 # torch.compile mode: default, reduce-overhead, or max-autotune (slower compile, faster inference)
 # TORCH_COMPILE_MODE=max-autotune
 
-# Quantization method to reduce VRAM usage
-# Options: int8_torchao, int4_torchao, or leave empty for full precision
-# VIBEVOICE_QUANTIZATION=int8_torchao
+# Quantization method to reduce VRAM usage.
+# Options:
+#   - awq                  : RECOMMENDED. AWQ-INT4 LLM swap. Set VIBEVOICE_MODEL_PATH=rsxdalv/VibeVoice-Large
+#                            and VIBEVOICE_AWQ_LLM_PATH below. ~8.4 GB VRAM, RTF ~0.70 on RTX 3090.
+#   - int8_torchao         : INT8 weight-only torchao. Slower than AWQ on Ampere.
+#   - int4_torchao         : INT4 weight-only torchao. Smallest but slowest dequant.
+#   - (empty)              : No runtime quantization (use a pre-quantized model instead).
+# VIBEVOICE_QUANTIZATION=awq
+
+# AWQ-INT4 LLM checkpoint (only used when VIBEVOICE_QUANTIZATION=awq).
+# HF model ID (auto-downloaded) or local path. Default uploads:
+#   ncoder-ai/VibeVoice-Large-AWQ-INT4 — quantization of rsxdalv/VibeVoice-Large LLM
+# VIBEVOICE_AWQ_LLM_PATH=ncoder-ai/VibeVoice-Large-AWQ-INT4
 
 # ============================================================
 # Voice Configuration

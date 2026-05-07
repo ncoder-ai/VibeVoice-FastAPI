@@ -19,7 +19,38 @@ A production-ready FastAPI server that exposes the VibeVoice TTS model as an Ope
 - **Multi-Format Support**: MP3, WAV, FLAC, AAC, M4A, Opus, PCM
 - **Streaming Support**: Real-time audio streaming for long-form content
 - **Voice Management**: Dynamic voice loading, OpenAI voice mapping, and custom voice presets
+- **AWQ-INT4 Quantization**: Optional LLM-only quantization to **8.4 GB VRAM** at **RTF ~0.70**
+  on RTX 3090 — faster + smaller than bnb-Q8, no audible quality loss. See
+  [AWQ-INT4 quickstart](#-awq-int4-quickstart-recommended-for-single-3090) below.
 - **Production Ready**: Health checks, error handling, CORS support, and comprehensive logging
+
+## ⚡ AWQ-INT4 Quickstart (recommended for single 3090)
+
+For best speed-to-VRAM ratio on a single 24 GB GPU:
+
+```bash
+# In your .env (or docker-env file):
+VIBEVOICE_MODEL_PATH=rsxdalv/VibeVoice-Large
+VIBEVOICE_QUANTIZATION=awq
+VIBEVOICE_AWQ_LLM_PATH=ncoder-ai/VibeVoice-Large-AWQ-INT4
+VIBEVOICE_INFERENCE_STEPS=7
+TORCH_COMPILE=true
+```
+
+Then start with `docker compose up -d --build`. The first request triggers download of
+both the FP16 base + AWQ-INT4 LLM (~22 GB total HF cache); subsequent runs reuse the cache.
+
+**Benchmarks** (RTX 3090, 277-char prompt, 7 steps):
+
+| Setup | VRAM | Generation Time | RTF |
+|---|---:|---:|---:|
+| `rsxdalv/VibeVoice-Large` (FP16) | 17.4 GB | ~9 s for 16 s audio | 0.54 |
+| `FabioSarracino/VibeVoice-Large-Q8` (bnb-Q8) | 10.8 GB | ~20 s for 16 s audio | 1.22 |
+| **rsxdalv + AWQ-INT4 graft** | **8.4 GB** | **~11 s for 16 s audio** | **0.70** |
+
+The AWQ-INT4 model is the LLM portion only ([`ncoder-ai/VibeVoice-Large-AWQ-INT4`](https://huggingface.co/ncoder-ai/VibeVoice-Large-AWQ-INT4)).
+The audio tokenizer + diffusion head stay FP16 (loaded from `rsxdalv/VibeVoice-Large`)
+to keep audio quality untouched.
 
 ## 📋 Quick Start
 

@@ -217,8 +217,10 @@ class TTSService:
         if not awq_path:
             logger.error("VIBEVOICE_QUANTIZATION=awq but VIBEVOICE_AWQ_LLM_PATH not set; skipping")
             return
-        if not os.path.isdir(awq_path):
-            logger.error(f"VIBEVOICE_AWQ_LLM_PATH={awq_path!r} is not a directory; skipping")
+        # Accept either a local directory or an HF model ID (e.g. "ncoder-ai/VibeVoice-Large-AWQ-INT4")
+        is_hf_id = "/" in awq_path and not awq_path.startswith("/") and not os.path.isabs(awq_path)
+        if not is_hf_id and not os.path.isdir(awq_path):
+            logger.error(f"VIBEVOICE_AWQ_LLM_PATH={awq_path!r} is neither a local directory nor a valid HF model ID; skipping")
             return
 
         try:
