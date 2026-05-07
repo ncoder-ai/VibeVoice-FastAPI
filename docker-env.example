@@ -39,21 +39,15 @@ VIBEVOICE_INFERENCE_STEPS=10
 # torch.compile mode: default, reduce-overhead, or max-autotune (slower compile, faster inference)
 # TORCH_COMPILE_MODE=max-autotune
 
-# Runtime quantization method (used only with FP16 base models — pre-quantized
+# Runtime torchao quantization (used only with FP16 base models — pre-quantized
 # models like ncoder-ai/VibeVoice-Large-AWQ or FabioSarracino/VibeVoice-Large-Q8
-# do NOT need this; their quantization_config is auto-detected).
+# do NOT need this; their quantization_config is auto-detected by transformers).
 # Options:
 #   - int8_torchao         : INT8 weight-only torchao. Slower than AWQ on Ampere.
 #   - int4_torchao         : INT4 weight-only torchao. Smallest but slowest dequant.
-#   - awq                  : LEGACY. 2-step graft using FP16 base + separate AWQ LLM.
-#                            Use VIBEVOICE_MODEL_PATH=ncoder-ai/VibeVoice-Large-AWQ
-#                            instead — same end result, no extra env vars.
-#   - (empty)              : No runtime quantization (use a pre-quantized model instead).
-# VIBEVOICE_QUANTIZATION=awq
-
-# Legacy AWQ LLM checkpoint (only used when VIBEVOICE_QUANTIZATION=awq).
-# DEPRECATED: use VIBEVOICE_MODEL_PATH=ncoder-ai/VibeVoice-Large-AWQ instead.
-# VIBEVOICE_AWQ_LLM_PATH=ncoder-ai/VibeVoice-Large-AWQ-INT4
+#   - (empty)              : No runtime quantization. Recommended — use the
+#                            pre-quantized ncoder-ai/VibeVoice-Large-AWQ instead.
+# VIBEVOICE_QUANTIZATION=int8_torchao
 
 # ============================================================
 # Voice Configuration

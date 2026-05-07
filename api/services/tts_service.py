@@ -59,22 +59,20 @@ class TTSService:
         # Load processor
         self.processor = VibeVoiceProcessor.from_pretrained(self.settings.vibevoice_model_path)
 
-        # Detect unified pre-quantized model (e.g. ncoder-ai/VibeVoice-Large-AWQ).
-        # When the checkpoint's config.json carries quantization_config, transformers
-        # auto-applies the swap inside from_pretrained — no graft step, no separate LLM path.
+        # Detect pre-quantized model (e.g. ncoder-ai/VibeVoice-Large-AWQ). When the
+        # checkpoint's config.json carries quantization_config, transformers wires the
+        # quant layers automatically inside from_pretrained — nothing else to do.
         unified_quantized = self._detect_unified_quantization(self.settings.vibevoice_model_path)
         if unified_quantized:
             logger.info(
-                f"Detected unified {unified_quantized} quantization in checkpoint — "
-                f"transformers will load AWQ layers directly via from_pretrained."
+                f"Detected pre-quantized {unified_quantized} checkpoint — "
+                f"transformers will load quant layers directly via from_pretrained."
             )
 
-        # Determine if we should load to CPU first for ad-hoc quantization (torchao etc).
-        # Skipped for unified pre-quantized models (their kernels need CUDA at load time)
-        # and the legacy "awq" graft path (handled by _apply_awq_swap after the FP16 load).
+        # Determine if we should load to CPU first for ad-hoc torchao quantization.
+        # Skipped for pre-quantized models (their kernels need CUDA at load time).
         load_to_cpu_first = (
             self.settings.vibevoice_quantization
-            and self.settings.vibevoice_quantization != "awq"
             and not unified_quantized
             and self.device == "cuda"
         )
@@ -162,11 +160,6 @@ class TTSService:
 
             self.model.eval()
 
-        # AWQ post-load swap (if configured) — model is already on CUDA in FP16; this
-        # frees the FP16 LLM and grafts in the AWQ-quantized one.
-        if self.settings.vibevoice_quantization == "awq":
-            self._apply_awq_swap()
-
         # Apply torch.compile for optimized inference
         if self.settings.torch_compile:
             try:
@@ -190,17 +183,15 @@ class TTSService:
         print("Model loaded successfully")
 
     def _apply_quantization(self):
-        """Apply quantization to the model based on settings.
+        """Apply runtime torchao quantization to the model based on settings.
 
         Supported VIBEVOICE_QUANTIZATION values:
           - "int8_torchao"          : INT8 weight-only (slowest matmul on Ampere — dequant overhead)
           - "int8_dynamic_torchao"  : W8A8 dynamic activation+weight quant — uses 3090 INT8 tensor cores
           - "int4_torchao"          : INT4 weight-only (smallest, biggest dequant overhead)
-          - "awq"                   : AWQ-INT4 graft via Marlin GEMM kernels — REQUIRES
-                                      VIBEVOICE_AWQ_LLM_PATH pointing at a pre-quantized
-                                      Qwen2 checkpoint. Loads VibeVoice in FP16, frees the
-                                      FP16 LLM, swaps in the AWQ-quantized one.
-                                      ~22% smaller VRAM than bnb-Q8 + ~2x faster on workshop.
+
+        For AWQ-INT4 use VIBEVOICE_MODEL_PATH=ncoder-ai/VibeVoice-Large-AWQ instead;
+        transformers auto-loads its embedded quantization_config via from_pretrained.
         """
         quant_method = self.settings.vibevoice_quantization
 
@@ -210,8 +201,6 @@ class TTSService:
             self._apply_torchao_quant(bits=8, mode="dynamic")
         elif quant_method == "int4_torchao":
             self._apply_torchao_quant(bits=4, mode="weight_only")
-        elif quant_method == "awq":
-            self._apply_awq_swap()
         else:
             logger.warning(f"Unknown quantization method: {quant_method}, skipping quantization")
 
@@ -244,63 +233,6 @@ class TTSService:
         except Exception as e:
             logger.debug(f"Could not probe quantization_config for {model_path}: {e}")
         return None
-
-    def _apply_awq_swap(self):
-        """Swap the FP16 language_model with an AWQ-INT4 quantized Qwen2.
-
-        Path comes from env var VIBEVOICE_AWQ_LLM_PATH (a directory containing
-        the AutoAWQ-saved Qwen2). The swap happens AFTER the full VibeVoice
-        FP16 model is loaded and moved to CUDA, then the FP16 LLM is freed.
-
-        DEPRECATED: prefer the unified ncoder-ai/VibeVoice-Large-AWQ checkpoint,
-        which transformers loads directly via from_pretrained — no graft needed.
-        """
-        import os, gc
-        awq_path = os.getenv("VIBEVOICE_AWQ_LLM_PATH")
-        if not awq_path:
-            logger.error("VIBEVOICE_QUANTIZATION=awq but VIBEVOICE_AWQ_LLM_PATH not set; skipping")
-            return
-        # Accept either a local directory or an HF model ID (e.g. "ncoder-ai/VibeVoice-Large-AWQ-INT4")
-        is_hf_id = "/" in awq_path and not awq_path.startswith("/") and not os.path.isabs(awq_path)
-        if not is_hf_id and not os.path.isdir(awq_path):
-            logger.error(f"VIBEVOICE_AWQ_LLM_PATH={awq_path!r} is neither a local directory nor a valid HF model ID; skipping")
-            return
-
-        try:
-            from awq import AutoAWQForCausalLM
-        except ImportError:
-            logger.error("autoawq not installed; pip install autoawq. Skipping AWQ swap.")
-            return
-
-        # Free the original FP16 LLM first to make room for AWQ load
-        logger.info("AWQ: freeing FP16 language_model to make room for AWQ-INT4")
-        old_lm = self.model.model.language_model
-        self.model.model.language_model = None
-        del old_lm
-        gc.collect()
-        if torch.cuda.is_available():
-            torch.cuda.empty_cache()
-            vram_freed = torch.cuda.memory_allocated() / 1024**3
-            logger.info(f"AWQ: VRAM after freeing FP16 LLM = {vram_freed:.2f} GB")
-
-        # Load the AWQ-quantized Qwen2 onto the same GPU
-        logger.info(f"AWQ: loading INT4-quantized Qwen2 from {awq_path}")
-        awq_full = AutoAWQForCausalLM.from_quantized(
-            awq_path,
-            device_map={"": 0},
-            safetensors=True,
-            fuse_layers=False,  # don't fuse — keep individual layers for hook compat with VibeVoice
-        )
-        # AutoAWQ wraps Qwen2ForCausalLM as awq_full.model; we want awq_full.model.model
-        # (the Qwen2Model encoder portion — the diffusion head consumes its hidden states)
-        self.model.model.language_model = awq_full.model.model
-        del awq_full
-        gc.collect()
-        if torch.cuda.is_available():
-            torch.cuda.empty_cache()
-            vram_after = torch.cuda.memory_allocated() / 1024**3
-            logger.info(f"AWQ: VRAM after AWQ swap = {vram_after:.2f} GB")
-        logger.info("AWQ: language_model swap complete")
 
     def _apply_torchao_quant(self, bits: int = 8, mode: str = "weight_only"):
         """

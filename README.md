@@ -51,10 +51,6 @@ The unified model has its Qwen2 LLM quantized to INT4 with AWQ + Marlin GEMM ker
 The audio tokenizer + diffusion head stay FP16 inside the same checkpoint, so audio
 quality is indistinguishable from FP16 at INFERENCE_STEPS=7.
 
-> **Legacy 2-step path:** the LLM-only [`ncoder-ai/VibeVoice-Large-AWQ-INT4`](https://huggingface.co/ncoder-ai/VibeVoice-Large-AWQ-INT4) repo plus
-> `VIBEVOICE_QUANTIZATION=awq` + `VIBEVOICE_AWQ_LLM_PATH=…` still works for backwards
-> compatibility. Prefer the single-model path above.
-
 ## 📋 Quick Start
 
 ### One-Click Install (Recommended)
@@ -194,7 +190,6 @@ curl http://localhost:8001/v1/audio/voices | jq
 ## MODEL MANAGEMENT
 VibeVoice Large (AWQ-INT4, recommended): Huggingface: ncoder-ai/VibeVoice-Large-AWQ [https://huggingface.co/ncoder-ai/VibeVoice-Large-AWQ]
 VibeVoice Large (FP16): Huggingface: rsxdalv/VibeVoice-Large [https://huggingface.co/rsxdalv/VibeVoice-Large]
-VibeVoice Large (AWQ-INT4 LLM only, advanced): Huggingface: ncoder-ai/VibeVoice-Large-AWQ-INT4 [https://huggingface.co/ncoder-ai/VibeVoice-Large-AWQ-INT4]
 
 
 VibeVoice 1.5B: Huggingface microsoft/VibeVoice-1.5B [https://huggingface.co/microsoft/VibeVoice-1.5B]
