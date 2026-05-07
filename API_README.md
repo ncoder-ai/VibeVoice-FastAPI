@@ -213,23 +213,26 @@ curl -X POST http://localhost:8001/v1/audio/speech \
 
 ### Available Models
 
-| Model | Size | Context | Max Length | VRAM Required |
-|-------|------|---------|------------|---------------|
-| VibeVoice-1.5B | 1.5B | 64K | ~90 min | 8GB+ |
-| VibeVoice-Large | 7B | 32K | ~45 min | 16GB+ |
+| Model | Size | Context | VRAM | RTF (RTX 3090) | Notes |
+|-------|------|---------|------|---------------:|-------|
+| **`ncoder-ai/VibeVoice-Large-AWQ`** | 7B (INT4) | 32K | **~8.4 GB** | **~0.70** | Recommended. AWQ-INT4 LLM + FP16 audio in one drop-in checkpoint. |
+| `rsxdalv/VibeVoice-Large` | 7B | 32K | ~17 GB | ~0.54 | Full FP16, fastest on a 24 GB card. |
+| `FabioSarracino/VibeVoice-Large-Q8` | 7B (INT8) | 32K | ~11 GB | ~1.22 | bnb-Q8. Slower than AWQ on Ampere; needs INFERENCE_STEPS=7+ to avoid audible noise. |
+| `microsoft/VibeVoice-1.5B` | 1.5B | 64K | ~8 GB | n/a | Single-speaker only, no voice cloning, no multi-speaker dialogue. |
+| `microsoft/VibeVoice-Realtime-0.5B` | 0.5B | — | ~4 GB | <0.3 | Single-speaker realtime variant. |
 
 ### Switching Models
 
 Edit `.env`:
 ```bash
-# Use HuggingFace model ID (downloads automatically)
-VIBEVOICE_MODEL_PATH=microsoft/VibeVoice-1.5B
+# Default — drop-in AWQ-INT4 (8.4 GB VRAM, RTF ~0.70)
+VIBEVOICE_MODEL_PATH=ncoder-ai/VibeVoice-Large-AWQ
 
-# Or use local cache path (faster loading)
-VIBEVOICE_MODEL_PATH=~/.cache/huggingface/hub/models--microsoft--VibeVoice-1.5B/snapshots/...
+# Or full-precision Large
+# VIBEVOICE_MODEL_PATH=rsxdalv/VibeVoice-Large
 
-# Or custom local path
-VIBEVOICE_MODEL_PATH=/path/to/your/model
+# Or a local path to any of the above (faster cold start than HF re-download)
+# VIBEVOICE_MODEL_PATH=/path/to/your/model
 ```
 
 Then restart the server.
@@ -242,12 +245,14 @@ Key settings in `.env`:
 
 ```bash
 # Model Configuration
-VIBEVOICE_MODEL_PATH=microsoft/VibeVoice-1.5B
-VIBEVOICE_DEVICE=cuda  # cuda, cpu, or mps
-VIBEVOICE_INFERENCE_STEPS=10  # 5-50, higher = better quality
+VIBEVOICE_MODEL_PATH=ncoder-ai/VibeVoice-Large-AWQ   # AWQ-INT4 drop-in, ~8.4 GB VRAM
+VIBEVOICE_DEVICE=cuda                                # cuda, cpu, or mps
+VIBEVOICE_INFERENCE_STEPS=7                          # 5-50; 7 is the sweet spot
+VIBEVOICE_DTYPE=float16                              # match AWQ's internal compute path
+VIBEVOICE_ATTN_IMPLEMENTATION=flash_attention_2      # falls back to sdpa if unavailable
 
 # Voice Configuration
-VOICES_DIR=demo/voices  # Directory with voice files
+VOICES_DIR=demo/voices                               # Directory with voice files
 
 # API Server
 API_HOST=0.0.0.0
@@ -255,12 +260,12 @@ API_PORT=8001
 API_CORS_ORIGINS=*
 
 # Performance Optimization
-TORCH_COMPILE=true                               # 20-50% speedup (slower first request)
-TORCH_COMPILE_MODE=max-autotune                  # default, reduce-overhead, or max-autotune
-# VIBEVOICE_QUANTIZATION=int8_torchao            # Reduce VRAM ~40%
+TORCH_COMPILE=true                                   # ~40% speedup (first request slower)
+TORCH_COMPILE_MODE=default                           # default, reduce-overhead, or max-autotune
+TORCH_CACHE_DIR=~/.cache/torch_compile_vibevoice     # persist compile cache across restarts
 
 # Generation Defaults
-DEFAULT_CFG_SCALE=1.8  # 1.0-3.0
+DEFAULT_CFG_SCALE=1.8                                # 1.0-3.0
 DEFAULT_RESPONSE_FORMAT=mp3
 DEFAULT_DO_SAMPLE=False
 DEFAULT_TEMPERATURE=1.0
@@ -268,6 +273,8 @@ DEFAULT_TOP_P=1.0
 DEFAULT_TOP_K=50
 DEFAULT_REPETITION_PENALTY=1.0
 ```
+
+> **Pre-quantized models** (like `ncoder-ai/VibeVoice-Large-AWQ` or `FabioSarracino/VibeVoice-Large-Q8`) embed their own `quantization_config` and are loaded directly by transformers — no extra `VIBEVOICE_QUANTIZATION` setting needed. `VIBEVOICE_QUANTIZATION` is only for runtime torchao quantization (`int8_torchao`, `int4_torchao`) on top of an FP16 base.
 
 ### Audio Formats
 
@@ -356,12 +363,17 @@ with open("speech.mp3", "wb") as f:
 
 ### CUDA Out of Memory
 
-1. Use smaller model:
+1. Switch to the AWQ-INT4 model (~8.4 GB VRAM, no quality loss):
+   ```bash
+   VIBEVOICE_MODEL_PATH=ncoder-ai/VibeVoice-Large-AWQ
+   ```
+
+2. Or fall back to the 1.5B single-speaker model (~8 GB VRAM):
    ```bash
    VIBEVOICE_MODEL_PATH=microsoft/VibeVoice-1.5B
    ```
 
-2. Reduce inference steps:
+3. Reduce inference steps:
    ```bash
    VIBEVOICE_INFERENCE_STEPS=5
    ```

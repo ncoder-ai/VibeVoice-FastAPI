@@ -68,8 +68,11 @@ open http://localhost:8001/docs
 ### Essential Settings in `.env`
 
 ```bash
-# Model (HuggingFace ID or local path)
-VIBEVOICE_MODEL_PATH=microsoft/VibeVoice-1.5B
+# Model (HuggingFace ID or local path).
+# Default = AWQ-INT4 drop-in (~8.4 GB VRAM, RTF ~0.70 on RTX 3090, multi-speaker).
+# Other options: rsxdalv/VibeVoice-Large (FP16, 17 GB), microsoft/VibeVoice-1.5B
+# (single-speaker, 8 GB), FabioSarracino/VibeVoice-Large-Q8 (bnb-Q8, slower).
+VIBEVOICE_MODEL_PATH=ncoder-ai/VibeVoice-Large-AWQ
 
 # Voice directory on HOST (required)
 # Linux/macOS:

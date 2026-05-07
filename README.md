@@ -231,24 +231,27 @@ Key environment variables (see `env.example` for full list):
 
 ```bash
 # Model Configuration
-VIBEVOICE_MODEL_PATH=microsoft/VibeVoice-1.5B  # or local path
-VIBEVOICE_DEVICE=cuda                           # cuda, cpu, or mps
-VIBEVOICE_INFERENCE_STEPS=10                    # 5-50, higher = better quality
+VIBEVOICE_MODEL_PATH=ncoder-ai/VibeVoice-Large-AWQ   # AWQ-INT4 drop-in, ~8.4 GB VRAM
+VIBEVOICE_DEVICE=cuda                                # cuda, cpu, or mps
+VIBEVOICE_INFERENCE_STEPS=7                          # 5-50; 7 is the sweet spot
+VIBEVOICE_DTYPE=float16                              # match AWQ's compute path
+VIBEVOICE_ATTN_IMPLEMENTATION=flash_attention_2      # falls back to sdpa if unavailable
 
 # Voice Configuration
-VOICES_DIR=demo/voices                           # Directory with voice files
+VOICES_DIR=demo/voices                               # Directory with voice files
 
 # API Configuration
 API_PORT=8001
 API_CORS_ORIGINS=*
 
 # Performance Optimization
-TORCH_COMPILE=true                               # 20-50% speedup (slower first request)
-TORCH_COMPILE_MODE=max-autotune                  # default, reduce-overhead, or max-autotune
-# VIBEVOICE_QUANTIZATION=int8_torchao            # Reduce VRAM ~40%
+TORCH_COMPILE=true                                   # ~40% speedup (slower first request)
+TORCH_COMPILE_MODE=default                           # default, reduce-overhead, or max-autotune
+TORCH_CACHE_DIR=~/.cache/torch_compile_vibevoice     # persist compile cache across restarts
+# VIBEVOICE_QUANTIZATION=int8_torchao                # Runtime torchao quant on top of FP16 base
 
 # Generation Defaults
-DEFAULT_CFG_SCALE=1.8                            # 1.0-3.0
+DEFAULT_CFG_SCALE=1.8                                # 1.0-3.0
 DEFAULT_RESPONSE_FORMAT=mp3
 ```
 
@@ -265,7 +268,7 @@ Docker is the **recommended and preferred** deployment method. It provides:
 
 - Docker and Docker Compose
 - NVIDIA Container Toolkit (for GPU support)
-- NVIDIA GPU with 8GB+ VRAM (for 1.5B model) or 16GB+ (for Large model)
+- NVIDIA GPU with 12GB+ VRAM recommended (8GB minimum with the AWQ-INT4 model)
 
 ### Quick Start
 
@@ -316,10 +319,13 @@ curl http://localhost:8001/v1/audio/voices
 
 ## 📊 Supported Models
 
-| Model | Size | Context | Max Length | VRAM Required |
-|-------|------|---------|------------|---------------|
-| VibeVoice-1.5B | 1.5B | 64K | ~90 min | 8GB+ |
-| VibeVoice-Large | 7B | 32K | ~45 min | 16GB+ |
+| Model | Size | Context | VRAM | RTF (RTX 3090) | Notes |
+|-------|------|---------|------|---------------:|-------|
+| **`ncoder-ai/VibeVoice-Large-AWQ`** | 7B (INT4) | 32K | **~8.4 GB** | **~0.70** | **Default.** AWQ-INT4 LLM + FP16 audio in one drop-in checkpoint. |
+| `rsxdalv/VibeVoice-Large` | 7B | 32K | ~17 GB | ~0.54 | Full FP16, fastest on a 24 GB card. |
+| `FabioSarracino/VibeVoice-Large-Q8` | 7B (INT8) | 32K | ~11 GB | ~1.22 | bnb-Q8. Slower than AWQ on Ampere. |
+| `microsoft/VibeVoice-1.5B` | 1.5B | 64K | ~8 GB | n/a | Single-speaker only, no voice cloning. |
+| `microsoft/VibeVoice-Realtime-0.5B` | 0.5B | — | ~4 GB | <0.3 | Single-speaker realtime variant. |
 
 Models are automatically downloaded from HuggingFace on first use.
 
@@ -327,7 +333,7 @@ Models are automatically downloaded from HuggingFace on first use.
 
 **For Docker Deployment (Recommended):**
 - **Docker**: Docker and Docker Compose installed
-- **GPU**: NVIDIA GPU with 8GB+ VRAM (for 1.5B model) or 16GB+ (for Large model)
+- **GPU**: NVIDIA GPU with 12GB+ VRAM recommended (8GB minimum with the AWQ-INT4 default)
 - **NVIDIA Container Toolkit**: Required for GPU support
 - **RAM**: 16GB minimum, 32GB recommended
 - **Storage**: 10GB minimum, 50GB recommended (with model cache)
@@ -382,7 +388,8 @@ Contributions are welcome! Please feel free to submit a Pull Request.
 - Check dependencies: `pip list | grep torch`
 
 ### Out of memory errors
-- Use smaller model: `VIBEVOICE_MODEL_PATH=microsoft/VibeVoice-1.5B`
+- Switch to the AWQ-INT4 model (~8.4 GB VRAM, no quality loss): `VIBEVOICE_MODEL_PATH=ncoder-ai/VibeVoice-Large-AWQ`
+- Or fall back to single-speaker 1.5B: `VIBEVOICE_MODEL_PATH=microsoft/VibeVoice-1.5B`
 - Reduce inference steps: `VIBEVOICE_INFERENCE_STEPS=5`
 - Use CPU mode: `VIBEVOICE_DEVICE=cpu` (much slower)
 

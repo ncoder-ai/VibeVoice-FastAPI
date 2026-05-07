@@ -10,9 +10,9 @@
 # RECOMMENDED: ncoder-ai/VibeVoice-Large-AWQ — drop-in AWQ-INT4 model.
 # ~8.4 GB VRAM at RTF ~0.70 — best quality + size + speed on a single 3090. No
 # extra env vars needed; transformers wires AWQ kernels automatically.
-VIBEVOICE_MODEL_PATH=microsoft/VibeVoice-1.5B
-#VIBEVOICE_MODEL_PATH=ncoder-ai/VibeVoice-Large-AWQ
+VIBEVOICE_MODEL_PATH=ncoder-ai/VibeVoice-Large-AWQ
 #VIBEVOICE_MODEL_PATH=rsxdalv/VibeVoice-Large
+#VIBEVOICE_MODEL_PATH=microsoft/VibeVoice-1.5B
 #VIBEVOICE_MODEL_PATH=FabioSarracino/VibeVoice-Large-Q8
 # Local path example:
 # VIBEVOICE_MODEL_PATH=/path/to/your/model
@@ -23,8 +23,10 @@ VIBEVOICE_DEVICE=cuda
 # Optional: Specify which GPU to use
 # CUDA_VISIBLE_DEVICES=0
 
-# Number of diffusion inference steps (5-50, higher = better quality but slower)
-VIBEVOICE_INFERENCE_STEPS=10
+# Number of diffusion inference steps (5-50, higher = better quality but slower).
+# 7 is the sweet spot for AWQ-INT4 and FP16 Large; the bnb-Q8 model needs 7+ to
+# avoid audible quantization noise.
+VIBEVOICE_INFERENCE_STEPS=7
 
 # Model dtype: bfloat16, float16, or float32 (auto-detected if not set)
 # VIBEVOICE_DTYPE=bfloat16
