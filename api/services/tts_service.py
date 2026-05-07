@@ -46,26 +46,36 @@ class TTSService:
         if self._model_loaded:
             print("Model already loaded")
             return
-        
+
         print(f"Loading VibeVoice model from {self.settings.vibevoice_model_path}")
-        
+
         # Get device and dtype
         self.device = self.settings.get_device()
         self.dtype = self.settings.get_dtype()
         attn_implementation = self.settings.get_attn_implementation()
-        
+
         print(f"Using device: {self.device}, dtype: {self.dtype}, attention: {attn_implementation}")
 
         # Load processor
         self.processor = VibeVoiceProcessor.from_pretrained(self.settings.vibevoice_model_path)
 
-        # Determine if we should load to CPU first for quantization
-        # This avoids loading full precision model to GPU then quantizing (wastes VRAM)
-        # AWQ is excluded — it loads from a pre-quantized checkpoint and is grafted in
-        # AFTER the full VibeVoice model is on CUDA (see _apply_awq_swap).
+        # Detect unified pre-quantized model (e.g. ncoder-ai/VibeVoice-Large-AWQ).
+        # When the checkpoint's config.json carries quantization_config, transformers
+        # auto-applies the swap inside from_pretrained — no graft step, no separate LLM path.
+        unified_quantized = self._detect_unified_quantization(self.settings.vibevoice_model_path)
+        if unified_quantized:
+            logger.info(
+                f"Detected unified {unified_quantized} quantization in checkpoint — "
+                f"transformers will load AWQ layers directly via from_pretrained."
+            )
+
+        # Determine if we should load to CPU first for ad-hoc quantization (torchao etc).
+        # Skipped for unified pre-quantized models (their kernels need CUDA at load time)
+        # and the legacy "awq" graft path (handled by _apply_awq_swap after the FP16 load).
         load_to_cpu_first = (
             self.settings.vibevoice_quantization
             and self.settings.vibevoice_quantization != "awq"
+            and not unified_quantized
             and self.device == "cuda"
         )
 
@@ -205,12 +215,45 @@ class TTSService:
         else:
             logger.warning(f"Unknown quantization method: {quant_method}, skipping quantization")
 
+    @staticmethod
+    def _detect_unified_quantization(model_path: str) -> str | None:
+        """Read config.json from a local dir or HF hub model and return the
+        `quant_method` string if the checkpoint is pre-quantized, else None.
+
+        The unified VibeVoice-Large-AWQ checkpoint embeds quantization_config in
+        its config.json so transformers wires AWQ layers automatically — no
+        separate graft step.
+        """
+        import os, json
+        try:
+            if os.path.isdir(model_path):
+                cfg_path = os.path.join(model_path, "config.json")
+                if not os.path.isfile(cfg_path):
+                    return None
+                with open(cfg_path, "r") as f:
+                    cfg = json.load(f)
+            else:
+                # HF hub model id — fetch config.json without downloading weights
+                from huggingface_hub import hf_hub_download
+                cfg_path = hf_hub_download(model_path, filename="config.json")
+                with open(cfg_path, "r") as f:
+                    cfg = json.load(f)
+            qcfg = cfg.get("quantization_config")
+            if qcfg and isinstance(qcfg, dict):
+                return qcfg.get("quant_method")
+        except Exception as e:
+            logger.debug(f"Could not probe quantization_config for {model_path}: {e}")
+        return None
+
     def _apply_awq_swap(self):
         """Swap the FP16 language_model with an AWQ-INT4 quantized Qwen2.
 
         Path comes from env var VIBEVOICE_AWQ_LLM_PATH (a directory containing
         the AutoAWQ-saved Qwen2). The swap happens AFTER the full VibeVoice
         FP16 model is loaded and moved to CUDA, then the FP16 LLM is freed.
+
+        DEPRECATED: prefer the unified ncoder-ai/VibeVoice-Large-AWQ checkpoint,
+        which transformers loads directly via from_pretrained — no graft needed.
         """
         import os, gc
         awq_path = os.getenv("VIBEVOICE_AWQ_LLM_PATH")

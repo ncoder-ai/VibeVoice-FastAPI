@@ -488,8 +488,9 @@ def main():
     print_step(3, TOTAL_STEPS, "Model Selection")
 
     model_options = [
-        ("VibeVoice-1.5B (default)", "Requires ~8GB VRAM — good quality, fast"),
-        ("VibeVoice-Large", "Requires ~16GB+ VRAM — best quality, slower"),
+        ("VibeVoice-1.5B", "~8GB VRAM, fast, single-speaker only"),
+        ("VibeVoice-Large-AWQ (recommended)", "~8.4GB VRAM, RTF ~0.7, multi-speaker"),
+        ("VibeVoice-Large (FP16)", "~18GB VRAM, RTF ~0.5, multi-speaker"),
         ("Custom model path", "Enter a HuggingFace model ID or local path"),
     ]
     model_choice = ask_choice("Which model would you like to use?",
@@ -497,6 +498,8 @@ def main():
     if model_choice == 0:
         config["model_path"] = "microsoft/VibeVoice-1.5B"
     elif model_choice == 1:
+        config["model_path"] = "ncoder-ai/VibeVoice-Large-AWQ"
+    elif model_choice == 2:
         config["model_path"] = "rsxdalv/VibeVoice-Large"
     else:
         config["model_path"] = ask_string("Enter model path (HuggingFace ID or local path)")
