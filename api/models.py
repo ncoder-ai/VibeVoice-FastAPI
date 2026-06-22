@@ -34,7 +34,15 @@ class OpenAITTSRequest(BaseModel):
         le=4.0,
         description="Speed of generated audio (0.25 to 4.0)"
     )
-    
+    stream: Optional[bool] = Field(
+        default=False,
+        description=(
+            "When true, stream the audio back as it is generated using chunked "
+            "transfer-encoding (OpenAI-compatible raw audio stream) instead of "
+            "buffering the full clip and returning it in one response."
+        )
+    )
+
     # Note: Voice validation removed to allow any VibeVoice preset name
     # Validation happens in the endpoint with proper error messages
 

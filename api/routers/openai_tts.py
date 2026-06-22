@@ -72,6 +72,40 @@ async def create_speech(
 
         formatted_script = tts.format_script_for_single_speaker(body.input, speaker_id=0)
 
+        if body.stream:
+            # Streaming path: honour the client's `stream` flag. We return the
+            # audio as a chunked transfer-encoded byte stream (OpenAI streams
+            # raw audio, not SSE). cancel_event is wired into model.generate()
+            # via stop_check_fn AND into create_streaming_response, which polls
+            # request.is_disconnected() and trips the event on client
+            # disconnect — freeing the GPU within one outer step.
+            cancel_event = threading.Event()
+
+            text_preview = body.input[:100] + "..." if len(body.input) > 100 else body.input
+            logger.info(
+                f"Generating speech (streaming) - Text: {text_preview} | Voice: {body.voice} | "
+                f"Model: {body.model} ({settings.vibevoice_model_path}) | CFG: {settings.default_cfg_scale}"
+            )
+
+            audio_stream = tts.generate_speech(
+                text=formatted_script,
+                voice_samples=[voice_audio],
+                cfg_scale=settings.default_cfg_scale,
+                stream=True,
+                cancel_event=cancel_event,
+            )
+
+            return create_streaming_response(
+                audio_stream,
+                format=body.response_format,
+                sample_rate=24000,
+                use_sse=False,
+                cancel_event=cancel_event,
+                request=request,
+            )
+
+        # Non-streaming path: run generation in a worker thread so we can poll
+        # for client disconnect while it runs.
         cancel_event = threading.Event()
         result_holder: dict = {}
 
